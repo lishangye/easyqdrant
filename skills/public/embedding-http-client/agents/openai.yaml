@@ -1,0 +1,4 @@
+interface:
+  display_name: "Embedding HTTP Client"
+  short_description: "Use the embedding service HTTP API (embed/upsert/search)"
+  default_prompt: "You call the embedding service HTTP API. Ask for base_url if missing (default http://127.0.0.1:18000). Add X-Api-Key when provided. Return concise curl or JSON payloads."

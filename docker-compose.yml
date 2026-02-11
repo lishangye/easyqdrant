@@ -1,0 +1,32 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.13.2
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+
+  embedding:
+    build: .
+    environment:
+      MODEL_NAME: BAAI/bge-small-zh-v1.5
+      BATCH_SIZE: "8"
+      UPSERT_BATCH_SIZE: "128"
+      MAX_LENGTH: "512"
+      NORMALIZE: "true"
+      OMP_NUM_THREADS: "2"
+      QDRANT_URL: http://qdrant:6333
+      DEFAULT_COLLECTION: documents
+      ON_DISK_PAYLOAD: "true"
+      DEFAULT_HNSW_EF: "64"
+      ENABLE_SCALAR_QUANTIZATION: "true"
+      QUANTIZATION_QUANTILE: "0.99"
+      QUANTIZATION_ALWAYS_RAM: "false"
+      # EMBED_API_KEY: "change_me"
+      # QDRANT_API_KEY: "change_me"
+    ports:
+      - "127.0.0.1:18000:8000"
+    volumes:
+      - ./models:/root/.cache
+    depends_on:
+      - qdrant
+    restart: unless-stopped
