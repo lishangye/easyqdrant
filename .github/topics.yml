@@ -1,0 +1,10 @@
+{
+  "topics": [
+    "vector-database",
+    "qdrant",
+    "embedding",
+    "fastapi",
+    "onnx",
+    "cpu-optimized"
+  ]
+}
