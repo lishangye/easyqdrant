@@ -8,7 +8,7 @@ on:
       - master
       - work
     paths:
-      - .github/topics.yml
+      - .github/topics.json
       - .github/workflows/sync-topics.yml
 
 permissions:
@@ -22,18 +22,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Sync topics from .github/topics.yml
+      - name: Sync topics from .github/topics.json
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-            const path = '.github/topics.yml';
+            const path = '.github/topics.json';
             const raw = fs.readFileSync(path, 'utf8');
             const config = JSON.parse(raw);
 
             if (!Array.isArray(config.topics) || config.topics.length === 0) {
-              core.setFailed('topics.yml must contain a non-empty "topics" array.');
+              core.setFailed('topics.json must contain a non-empty "topics" array.');
               return;
             }
 

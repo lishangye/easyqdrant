@@ -52,6 +52,12 @@
 ## MCP 支持（供大模型工具调用）
 仓库已内置 MCP 服务（`app/mcp_server.py`），可让 Claude Desktop、Cursor、Cherry Studio 等客户端把当前向量 API 作为工具调用。
 
+先安装 MCP 可选依赖：
+
+```bash
+pip install -r requirements-mcp.txt
+```
+
 先启动 embedding API，再通过 stdio 启动 MCP：
 
 ```bash

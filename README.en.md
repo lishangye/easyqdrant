@@ -52,6 +52,12 @@ A gentle, ready-to-run vector service for local/private setups—great for RAG, 
 ## MCP support (for LLM tool calling)
 This repo now includes an MCP server (`app/mcp_server.py`) so LLM clients (Claude Desktop, Cursor, Cherry Studio, etc.) can call your vector APIs as tools.
 
+Install optional MCP dependency first:
+
+```bash
+pip install -r requirements-mcp.txt
+```
+
 Start the embedding API first, then run MCP via stdio:
 
 ```bash
