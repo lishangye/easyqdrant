@@ -1,10 +1,24 @@
 {
   "topics": [
-    "vector-database",
     "qdrant",
+    "vector-database",
+    "vector-search",
+    "semantic-search",
     "embedding",
+    "retrieval-augmented-generation",
+    "rag",
+    "knowledge-base",
+    "information-retrieval",
+    "llm",
+    "mcp",
+    "model-context-protocol",
     "fastapi",
+    "python",
     "onnx",
-    "cpu-optimized"
+    "onnxruntime",
+    "fastembed",
+    "docker",
+    "docker-compose",
+    "api-service"
   ]
 }
