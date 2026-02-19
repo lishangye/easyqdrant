@@ -1,0 +1,15 @@
+# Python cache/artifacts
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+
+# Local model/runtime data
+models/
+qdrant_storage/
+
+# OS/editor artifacts
+.DS_Store
+.idea/
+.vscode/
