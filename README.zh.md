@@ -47,6 +47,43 @@
 - 索引/量化：`DEFAULT_HNSW_EF`，`ENABLE_SCALAR_QUANTIZATION`，`QUANTIZATION_QUANTILE`，`QUANTIZATION_ALWAYS_RAM`，`UPSERT_BATCH_SIZE`
 - 鉴权：`EMBED_API_KEY`（需要时传 `X-Api-Key`）
 - 日志：`LOG_LEVEL`
+- MCP 桥接：`EMBEDDING_API_URL`（默认 `http://127.0.0.1:18000`），`MCP_SERVER_NAME`
+
+## MCP 支持（供大模型工具调用）
+仓库已内置 MCP 服务（`app/mcp_server.py`），可让 Claude Desktop、Cursor、Cherry Studio 等客户端把当前向量 API 作为工具调用。
+
+先启动 embedding API，再通过 stdio 启动 MCP：
+
+```bash
+python -m app.mcp_server
+```
+
+可用 MCP 工具：
+- `healthz`
+- `list_collections`
+- `ensure_collection`
+- `upsert`
+- `search`
+- `query_hybrid`
+- `retrieve`
+- `delete`
+
+示例 MCP 客户端配置：
+
+```json
+{
+  "mcpServers": {
+    "easyqdrant": {
+      "command": "python",
+      "args": ["-m", "app.mcp_server"],
+      "env": {
+        "EMBEDDING_API_URL": "http://127.0.0.1:18000",
+        "EMBED_API_KEY": ""
+      }
+    }
+  }
+}
+```
 
 ## API 一览
 - 健康与指标：`GET /healthz`，`GET /metrics`

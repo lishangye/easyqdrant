@@ -47,6 +47,43 @@ A gentle, ready-to-run vector service for local/private setups—great for RAG, 
 - Index/quantization: `DEFAULT_HNSW_EF`, `ENABLE_SCALAR_QUANTIZATION`, `QUANTIZATION_QUANTILE`, `QUANTIZATION_ALWAYS_RAM`, `UPSERT_BATCH_SIZE`
 - Auth: `EMBED_API_KEY` (send `X-Api-Key`)
 - Logging: `LOG_LEVEL`
+- MCP bridge: `EMBEDDING_API_URL` (default `http://127.0.0.1:18000`), `MCP_SERVER_NAME`
+
+## MCP support (for LLM tool calling)
+This repo now includes an MCP server (`app/mcp_server.py`) so LLM clients (Claude Desktop, Cursor, Cherry Studio, etc.) can call your vector APIs as tools.
+
+Start the embedding API first, then run MCP via stdio:
+
+```bash
+python -m app.mcp_server
+```
+
+Available MCP tools include:
+- `healthz`
+- `list_collections`
+- `ensure_collection`
+- `upsert`
+- `search`
+- `query_hybrid`
+- `retrieve`
+- `delete`
+
+Example MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "easyqdrant": {
+      "command": "python",
+      "args": ["-m", "app.mcp_server"],
+      "env": {
+        "EMBEDDING_API_URL": "http://127.0.0.1:18000",
+        "EMBED_API_KEY": ""
+      }
+    }
+  }
+}
+```
 
 ## API map
 - Health/metrics: `GET /healthz`, `GET /metrics`
