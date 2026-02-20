@@ -46,15 +46,61 @@
 - Qdrant：`QDRANT_URL`，`QDRANT_API_KEY`，`DEFAULT_COLLECTION`，`ON_DISK_PAYLOAD`
 - 索引/量化：`DEFAULT_HNSW_EF`，`ENABLE_SCALAR_QUANTIZATION`，`QUANTIZATION_QUANTILE`，`QUANTIZATION_ALWAYS_RAM`，`UPSERT_BATCH_SIZE`
 - 鉴权：`EMBED_API_KEY`（需要时传 `X-Api-Key`）
+- 权限与审计：`ENABLE_RBAC`，`DEFAULT_ROLE`，`AUDIT_MAX_EVENTS`
 - 日志：`LOG_LEVEL`
+- MCP 桥接：`EMBEDDING_API_URL`（默认 `http://127.0.0.1:18000`），`MCP_SERVER_NAME`
+
+## MCP 支持（供大模型工具调用）
+仓库已内置 MCP 服务（`app/mcp_server.py`），可让 Claude Desktop、Cursor、Cherry Studio 等客户端把当前向量 API 作为工具调用。
+
+先安装 MCP 可选依赖：
+
+```bash
+pip install -r requirements-mcp.txt
+```
+
+先启动 embedding API，再通过 stdio 启动 MCP：
+
+```bash
+python -m app.mcp_server
+```
+
+可用 MCP 工具：
+- `healthz`
+- `list_collections`
+- `ensure_collection`
+- `upsert`
+- `search`
+- `query_hybrid`
+- `retrieve`
+- `delete`
+
+示例 MCP 客户端配置：
+
+```json
+{
+  "mcpServers": {
+    "easyqdrant": {
+      "command": "python",
+      "args": ["-m", "app.mcp_server"],
+      "env": {
+        "EMBEDDING_API_URL": "http://127.0.0.1:18000",
+        "EMBED_API_KEY": ""
+      }
+    }
+  }
+}
+```
 
 ## API 一览
 - 健康与指标：`GET /healthz`，`GET /metrics`
+- OpenAI 兼容向量化：`POST /v1/embeddings`
 - 集合：`GET /collections`，`GET /collections/{name}/stats`，`POST /collections/{name}/ensure`
 - 写入：`POST /upsert`，`POST /bulk-upsert-file`（JSONL，返回 task_id），`GET /tasks/{task_id}`
 - 检索：`POST /search`，`POST /query-hybrid`，`POST /rerank`
 - 数据访问：`POST /retrieve`，`POST /scroll`
 - 元数据：`POST /update-payload`，`POST /delete`
+- 审计：`GET /audit/events`（仅 auditor/admin）
 
 ## 常用示例
 > 如开启鉴权，记得加 `-H "X-Api-Key: $EMBED_API_KEY"`。
@@ -152,3 +198,6 @@ curl -X POST 'http://127.0.0.1:18000/delete' \
 
 ## 贡献
 欢迎 PR / Issue：新模型支持、检索示例、压测与调优心得。
+
+## 测试记录
+- 详细测试数据、迭代过程与结果见：`docs/TESTING_REPORT.md`
