@@ -48,6 +48,7 @@
 - Qdrant：`QDRANT_URL`，`QDRANT_API_KEY`，`DEFAULT_COLLECTION`，`ON_DISK_PAYLOAD`
 - 索引/量化：`DEFAULT_HNSW_EF`，`ENABLE_SCALAR_QUANTIZATION`，`QUANTIZATION_QUANTILE`，`QUANTIZATION_ALWAYS_RAM`，`UPSERT_BATCH_SIZE`
 - 鉴权：`EMBED_API_KEY`（需要时传 `X-Api-Key`）
+- 权限与审计：`ENABLE_RBAC`，`DEFAULT_ROLE`，`AUDIT_MAX_EVENTS`
 - 日志：`LOG_LEVEL`
 - MCP 桥接：`EMBEDDING_API_URL`（默认 `http://127.0.0.1:18000`），`MCP_SERVER_NAME`
 
@@ -95,11 +96,13 @@ python -m app.mcp_server
 
 ## API 一览
 - 健康与指标：`GET /healthz`，`GET /metrics`
+- OpenAI 兼容向量化：`POST /v1/embeddings`
 - 集合：`GET /collections`，`GET /collections/{name}/stats`，`POST /collections/{name}/ensure`
 - 写入：`POST /upsert`，`POST /bulk-upsert-file`（JSONL，返回 task_id），`GET /tasks/{task_id}`
 - 检索：`POST /search`，`POST /query-hybrid`，`POST /rerank`
 - 数据访问：`POST /retrieve`，`POST /scroll`
 - 元数据：`POST /update-payload`，`POST /delete`
+- 审计：`GET /audit/events`（仅 auditor/admin）
 
 ## 常用示例
 > 如开启鉴权，记得加 `-H "X-Api-Key: $EMBED_API_KEY"`。

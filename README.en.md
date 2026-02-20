@@ -46,6 +46,7 @@ A gentle, ready-to-run vector service for local/private setups—great for RAG, 
 - Qdrant: `QDRANT_URL`, `QDRANT_API_KEY`, `DEFAULT_COLLECTION`, `ON_DISK_PAYLOAD`
 - Index/quantization: `DEFAULT_HNSW_EF`, `ENABLE_SCALAR_QUANTIZATION`, `QUANTIZATION_QUANTILE`, `QUANTIZATION_ALWAYS_RAM`, `UPSERT_BATCH_SIZE`
 - Auth: `EMBED_API_KEY` (send `X-Api-Key`)
+- RBAC & audit: `ENABLE_RBAC`, `DEFAULT_ROLE`, `AUDIT_MAX_EVENTS`
 - Logging: `LOG_LEVEL`
 - MCP bridge: `EMBEDDING_API_URL` (default `http://127.0.0.1:18000`), `MCP_SERVER_NAME`
 
@@ -93,11 +94,13 @@ Example MCP client config:
 
 ## API map
 - Health/metrics: `GET /healthz`, `GET /metrics`
+- OpenAI-compatible embeddings: `POST /v1/embeddings`
 - Collections: `GET /collections`, `GET /collections/{name}/stats`, `POST /collections/{name}/ensure`
 - Ingest: `POST /upsert`, `POST /bulk-upsert-file` (JSONL, task_id), `GET /tasks/{task_id}`
 - Search: `POST /search`, `POST /query-hybrid`, `POST /rerank`
 - Data: `POST /retrieve`, `POST /scroll`
 - Metadata: `POST /update-payload`, `POST /delete`
+- Audit: `GET /audit/events` (auditor/admin only)
 
 ## Quick examples
 > If auth is on, add `-H "X-Api-Key: $EMBED_API_KEY"`.
