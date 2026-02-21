@@ -200,3 +200,6 @@ curl -X POST 'http://127.0.0.1:18000/delete' \
 
 ## 贡献
 欢迎 PR / Issue：新模型支持、检索示例、压测与调优心得。
+
+## 测试记录
+- 详细测试数据、迭代过程与结果见：`docs/TESTING_REPORT.md`

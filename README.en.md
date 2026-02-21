@@ -198,3 +198,6 @@ curl -X POST 'http://127.0.0.1:18000/delete' \
 
 ## Contributing
 PRs/issues welcome—new models, search/filter examples, benchmarks, and tuning tips.
+
+## Testing record
+- Detailed test data, iteration logs, and outcomes: `docs/TESTING_REPORT.md`
