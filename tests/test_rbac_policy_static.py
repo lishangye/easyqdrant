@@ -29,7 +29,7 @@ def test_role_permissions_have_expected_baseline():
     assert 'collections.ensure' not in perms['writer']
 
     assert perms['admin'] == ['*']
-    assert perms['auditor'] == ['audit.read', 'collections.list', 'collections.stats']
+    assert perms['auditor'] == ['audit.read', 'memory.read', 'collections.list', 'collections.stats']
 
 
 def test_collection_patterns_defined_for_all_roles():

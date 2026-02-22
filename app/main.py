@@ -54,6 +54,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "vectors.retrieve",
         "vectors.scroll",
         "vectors.rerank",
+        "memory.read",
         "collections.list",
         "collections.stats",
     ],
@@ -66,11 +67,13 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "vectors.upsert",
         "vectors.update",
         "vectors.delete",
+        "memory.read",
+        "memory.write",
         "collections.list",
         "collections.stats",
     ],
     "admin": ["*"],
-    "auditor": ["audit.read", "collections.list", "collections.stats"],
+    "auditor": ["audit.read", "memory.read", "collections.list", "collections.stats"],
 }
 
 ROLE_COLLECTION_PATTERNS: Dict[str, List[str]] = {
@@ -381,6 +384,70 @@ class AuditEvent(BaseModel):
 class AuditEventsResponse(BaseModel):
     count: int
     events: List[AuditEvent]
+
+
+class MemorySpaceEnsureRequest(BaseModel):
+    collection: str = DEFAULT_COLLECTION
+    recreate: bool = False
+
+
+class MemoryPutItem(BaseModel):
+    id: Optional[Union[int, str]] = None
+    text: str
+    role: str = "fact"
+    importance: float = Field(default=0.5, ge=0.0, le=1.0)
+    tags: List[str] = Field(default_factory=list)
+    source: Optional[str] = None
+    session_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryWriteRequest(BaseModel):
+    collection: str = DEFAULT_COLLECTION
+    items: List[MemoryPutItem] = Field(min_length=1)
+    prefix: str = "memory: "
+
+
+class MemoryQueryRequest(BaseModel):
+    collection: str = DEFAULT_COLLECTION
+    query: str
+    top_k: int = Field(default=10, ge=1, le=100)
+    min_importance: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    tags_any: Optional[List[str]] = None
+    session_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    with_payload: bool = True
+
+
+class MemoryGetRequest(BaseModel):
+    collection: str = DEFAULT_COLLECTION
+    ids: List[Union[int, str]] = Field(min_length=1)
+
+
+class MemoryUpdateRequest(BaseModel):
+    collection: str = DEFAULT_COLLECTION
+    ids: List[Union[int, str]] = Field(min_length=1)
+    set_payload: Dict[str, Any]
+    wait: bool = True
+
+
+class MemoryForgetRequest(BaseModel):
+    collection: str = DEFAULT_COLLECTION
+    ids: Optional[List[Union[int, str]]] = None
+    session_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    tags_any: Optional[List[str]] = None
+    wait: bool = True
+
+
+class MemoryScrollRequest(BaseModel):
+    collection: str = DEFAULT_COLLECTION
+    limit: int = Field(default=20, ge=1, le=500)
+    offset: Optional[Union[int, str]] = None
+    session_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    tags_any: Optional[List[str]] = None
 
 
 def _tokenize(text: str) -> List[str]:
@@ -1128,3 +1195,224 @@ def get_audit_events(
     filtered = filtered[-limit:]
     _audit_event(x_actor or "anonymous", role, "audit.read", None, None, len(filtered), "ok")
     return {"count": len(filtered), "events": filtered}
+
+
+def _memory_filter(
+    min_importance: Optional[float] = None,
+    tags_any: Optional[List[str]] = None,
+    session_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> Optional[models.Filter]:
+    conditions: List[Any] = []
+    if min_importance is not None:
+        conditions.append(
+            models.FieldCondition(
+                key="importance",
+                range=models.Range(gte=min_importance),
+            )
+        )
+    if tags_any:
+        conditions.append(
+            models.FieldCondition(
+                key="tags",
+                match=models.MatchAny(any=tags_any),
+            )
+        )
+    if session_id:
+        conditions.append(models.FieldCondition(key="session_id", match=models.MatchValue(value=session_id)))
+    if agent_id:
+        conditions.append(models.FieldCondition(key="agent_id", match=models.MatchValue(value=agent_id)))
+    if not conditions:
+        return None
+    return models.Filter(must=conditions)
+
+
+@app.post("/memory/spaces/ensure")
+def memory_space_ensure(
+    req: MemorySpaceEnsureRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "collections.ensure", req.collection)
+    result = ensure_collection(req.collection, EnsureCollectionRequest(recreate=req.recreate), x_api_key, x_role, x_actor)
+    _audit_event(x_actor or "anonymous", role, "memory.manage", req.collection, None, None, "ok")
+    return result
+
+
+@app.post("/memory/write")
+def memory_write(
+    req: MemoryWriteRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "memory.write", req.collection)
+
+    converted: List[UpsertItem] = []
+    for item in req.items:
+        payload = dict(item.metadata)
+        payload.update(
+            {
+                "role": item.role,
+                "importance": item.importance,
+                "tags": item.tags,
+                "source": item.source,
+                "session_id": item.session_id,
+                "agent_id": item.agent_id,
+                "created_by": x_actor,
+            }
+        )
+        converted.append(UpsertItem(id=item.id, text=item.text, metadata=payload))
+
+    count = _upsert_items(req.collection, converted, req.prefix, True)
+    _audit_event(x_actor or "anonymous", role, "memory.write", req.collection, None, count, "ok")
+    return {"collection": req.collection, "count": count}
+
+
+@app.post("/memory/query")
+def memory_query(
+    req: MemoryQueryRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "memory.read", req.collection)
+    assert qdrant is not None
+    _ensure_collection(req.collection)
+
+    vector = _embed_texts(["query: " + req.query])[0].tolist()
+    query_filter = _memory_filter(req.min_importance, req.tags_any, req.session_id, req.agent_id)
+    hits = qdrant.search(
+        collection_name=req.collection,
+        query_vector=vector,
+        limit=req.top_k,
+        query_filter=query_filter,
+        with_payload=req.with_payload,
+        search_params=models.SearchParams(hnsw_ef=DEFAULT_HNSW_EF, exact=False),
+    )
+    results = [
+        {"id": hit.id, "score": float(hit.score), "payload": hit.payload if req.with_payload else None}
+        for hit in hits
+    ]
+    _audit_event(x_actor or "anonymous", role, "memory.read", req.collection, req.query, len(results), "ok")
+    return {"collection": req.collection, "count": len(results), "results": results}
+
+
+@app.post("/memory/get")
+def memory_get(
+    req: MemoryGetRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "memory.read", req.collection)
+    response = retrieve(
+        RetrieveRequest(collection=req.collection, ids=req.ids, with_payload=True, with_vectors=False),
+        x_api_key,
+        x_role,
+        x_actor,
+    )
+    _audit_event(x_actor or "anonymous", role, "memory.read", req.collection, None, response.get("count", 0), "ok")
+    return response
+
+
+@app.post("/memory/update")
+def memory_update(
+    req: MemoryUpdateRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "memory.write", req.collection)
+    out = update_payload(
+        UpdatePayloadRequest(collection=req.collection, payload=req.set_payload, ids=req.ids, wait=req.wait),
+        x_api_key,
+        x_role,
+        x_actor,
+    )
+    _audit_event(x_actor or "anonymous", role, "memory.write", req.collection, None, len(req.ids), "ok")
+    return out
+
+
+@app.post("/memory/forget")
+def memory_forget(
+    req: MemoryForgetRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "memory.write", req.collection)
+
+    if req.ids:
+        out = delete(DeleteRequest(collection=req.collection, ids=req.ids, wait=req.wait), x_api_key, x_role, x_actor)
+        _audit_event(x_actor or "anonymous", role, "memory.write", req.collection, None, len(req.ids), "ok")
+        return out
+
+    mem_filter = _memory_filter(None, req.tags_any, req.session_id, req.agent_id)
+    if mem_filter is None:
+        raise HTTPException(status_code=400, detail="ids or at least one filter is required")
+
+    out = delete(
+        DeleteRequest(collection=req.collection, filter=mem_filter.model_dump(mode="json"), wait=req.wait),
+        x_api_key,
+        x_role,
+        x_actor,
+    )
+    _audit_event(x_actor or "anonymous", role, "memory.write", req.collection, None, out.get("requested", 0), "ok")
+    return out
+
+
+@app.post("/memory/scroll")
+def memory_scroll(
+    req: MemoryScrollRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "memory.read", req.collection)
+    mem_filter = _memory_filter(None, req.tags_any, req.session_id, req.agent_id)
+    out = scroll(
+        ScrollRequest(
+            collection=req.collection,
+            limit=req.limit,
+            offset=req.offset,
+            with_payload=True,
+            with_vectors=False,
+            filter=mem_filter.model_dump(mode="json") if mem_filter else None,
+        ),
+        x_api_key,
+        x_role,
+        x_actor,
+    )
+    _audit_event(x_actor or "anonymous", role, "memory.read", req.collection, None, out.get("count", 0), "ok")
+    return out
+
+
+@app.get("/memory/spaces/{collection}/stats")
+def memory_space_stats(
+    collection: str,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "memory.read", collection)
+    stats = collection_stats(collection, x_api_key, x_role, x_actor)
+    _audit_event(x_actor or "anonymous", role, "memory.read", collection, None, None, "ok")
+    return stats

@@ -11,6 +11,7 @@ def test_readmes_document_openai_and_audit_features():
         assert '/audit/events' in text
         assert 'ENABLE_RBAC' in text
         assert 'AUDIT_MAX_EVENTS' in text
+        assert 'AGENT_MEMORY_API.md' in text
 
 
 def test_agent_md_includes_governance_commit_requirements():
@@ -33,3 +34,16 @@ def test_test_report_exists_and_contains_iterations():
     assert 'Round 2' in text
     assert '测试数据' in text
     assert '环境限制' in text
+
+
+def test_memory_api_doc_exists_and_has_core_sections():
+    text = Path('docs/AGENT_MEMORY_API.md').read_text()
+    for token in [
+        'POST /memory/write',
+        'POST /memory/query',
+        'POST /memory/forget',
+        'session_id',
+        'agent_id',
+        '推荐调用流程（Agent）',
+    ]:
+        assert token in text

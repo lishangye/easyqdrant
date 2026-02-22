@@ -103,6 +103,7 @@ python -m app.mcp_server
 - 数据访问：`POST /retrieve`，`POST /scroll`
 - 元数据：`POST /update-payload`，`POST /delete`
 - 审计：`GET /audit/events`（仅 auditor/admin）
+- Agent 长期记忆：`POST /memory/spaces/ensure`、`POST /memory/write`、`POST /memory/query`、`POST /memory/get`、`POST /memory/update`、`POST /memory/forget`、`POST /memory/scroll`、`GET /memory/spaces/{collection}/stats`
 
 ## 常用示例
 > 如开启鉴权，记得加 `-H "X-Api-Key: $EMBED_API_KEY"`。
@@ -203,3 +204,6 @@ curl -X POST 'http://127.0.0.1:18000/delete' \
 
 ## 测试记录
 - 详细测试数据、迭代过程与结果见：`docs/TESTING_REPORT.md`
+
+## Agent 长期记忆接口
+- 详细接口设计、字段约定、调用流程与错误说明：`docs/AGENT_MEMORY_API.md`

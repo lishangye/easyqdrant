@@ -101,6 +101,7 @@ Example MCP client config:
 - Data: `POST /retrieve`, `POST /scroll`
 - Metadata: `POST /update-payload`, `POST /delete`
 - Audit: `GET /audit/events` (auditor/admin only)
+- Agent memory APIs: `POST /memory/spaces/ensure`, `POST /memory/write`, `POST /memory/query`, `POST /memory/get`, `POST /memory/update`, `POST /memory/forget`, `POST /memory/scroll`, `GET /memory/spaces/{collection}/stats`
 
 ## Quick examples
 > If auth is on, add `-H "X-Api-Key: $EMBED_API_KEY"`.
@@ -201,3 +202,6 @@ PRs/issues welcome—new models, search/filter examples, benchmarks, and tuning 
 
 ## Testing record
 - Detailed test data, iteration logs, and outcomes: `docs/TESTING_REPORT.md`
+
+## Agent long-term memory APIs
+- Full API contract, field conventions, workflow and error guide: `docs/AGENT_MEMORY_API.md`

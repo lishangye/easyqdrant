@@ -98,3 +98,55 @@
   1) FastAPI TestClient 集成测试；
   2) Qdrant 联调 E2E；
   3) 并发/压测（search、upsert、audit endpoint）。
+
+
+## Round 5（长期记忆 API 扩展后的回归）
+新增内容：
+- 新增 `tests/test_memory_api_static.py`，覆盖长期记忆接口族路由、请求模型与过滤器能力。
+- 更新 `tests/test_docs_consistency.py`，校验 `docs/AGENT_MEMORY_API.md` 的关键章节与三份 README 的文档引用。
+
+执行：
+1. `python -m compileall -q app tests scripts && echo COMPILE_OK`
+2. `pytest -q`
+
+结果：
+- 首轮出现 1 个失败（`auditor` 角色权限预期未同步，测试仍按旧矩阵断言）。
+- 修复测试期望后复测通过：`21 passed`。
+
+测试数据补充（长期记忆接口）
+- Write:
+```json
+{
+  "collection": "agent_memory",
+  "items": [{
+    "id": "mem-1",
+    "text": "用户喜欢简洁回答",
+    "role": "preference",
+    "importance": 0.9,
+    "tags": ["style", "user_profile"],
+    "session_id": "sess-001",
+    "agent_id": "agent-A"
+  }]
+}
+```
+- Query:
+```json
+{
+  "collection": "agent_memory",
+  "query": "回答风格偏好",
+  "top_k": 10,
+  "min_importance": 0.5,
+  "tags_any": ["style"],
+  "session_id": "sess-001",
+  "agent_id": "agent-A"
+}
+```
+- Forget（按过滤）:
+```json
+{
+  "collection": "agent_memory",
+  "session_id": "sess-001",
+  "tags_any": ["temporary"],
+  "wait": true
+}
+```
