@@ -4,6 +4,9 @@ import os
 import tempfile
 import threading
 import time
+from collections import deque
+from fnmatch import fnmatch
+from hashlib import sha256
 from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -40,6 +43,45 @@ QUANTIZATION_ALWAYS_RAM = os.getenv("QUANTIZATION_ALWAYS_RAM", "false").lower() 
     "yes",
 )
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+ENABLE_RBAC = os.getenv("ENABLE_RBAC", "false").lower() in ("1", "true", "yes")
+DEFAULT_ROLE = os.getenv("DEFAULT_ROLE", "reader")
+AUDIT_MAX_EVENTS = int(os.getenv("AUDIT_MAX_EVENTS", "2000"))
+
+ROLE_PERMISSIONS: Dict[str, List[str]] = {
+    "reader": [
+        "vectors.embed",
+        "vectors.search",
+        "vectors.retrieve",
+        "vectors.scroll",
+        "vectors.rerank",
+        "memory.read",
+        "collections.list",
+        "collections.stats",
+    ],
+    "writer": [
+        "vectors.embed",
+        "vectors.search",
+        "vectors.retrieve",
+        "vectors.scroll",
+        "vectors.rerank",
+        "vectors.upsert",
+        "vectors.update",
+        "vectors.delete",
+        "memory.read",
+        "memory.write",
+        "collections.list",
+        "collections.stats",
+    ],
+    "admin": ["*"],
+    "auditor": ["audit.read", "memory.read", "collections.list", "collections.stats"],
+}
+
+ROLE_COLLECTION_PATTERNS: Dict[str, List[str]] = {
+    "reader": ["*"],
+    "writer": ["*"],
+    "admin": ["*"],
+    "auditor": ["*"],
+}
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -60,6 +102,9 @@ error_counter: Dict[Tuple[str, str], int] = {}
 
 tasks_lock = threading.Lock()
 tasks_state: Dict[str, Dict[str, Any]] = {}
+
+audit_lock = threading.Lock()
+audit_events: deque[Dict[str, Any]] = deque(maxlen=AUDIT_MAX_EVENTS)
 
 
 @app.middleware("http")
@@ -93,6 +138,69 @@ async def access_log_and_metrics(request: Request, call_next):
 def check_key(x_api_key: Optional[str]) -> None:
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def _resolve_role(x_role: Optional[str]) -> str:
+    role = (x_role or DEFAULT_ROLE).strip().lower()
+    if role not in ROLE_PERMISSIONS:
+        raise HTTPException(status_code=403, detail=f"Unknown role: {role}")
+    return role
+
+
+def _allowed_for_collection(role: str, collection: Optional[str]) -> bool:
+    if collection is None:
+        return True
+    for pattern in ROLE_COLLECTION_PATTERNS.get(role, []):
+        if fnmatch(collection, pattern):
+            return True
+    return False
+
+
+def _authorize(role: str, action: str, collection: Optional[str]) -> None:
+    if not ENABLE_RBAC:
+        return
+    perms = ROLE_PERMISSIONS.get(role, [])
+    if "*" not in perms and action not in perms:
+        raise HTTPException(status_code=403, detail=f"Role '{role}' not allowed for action '{action}'")
+    if not _allowed_for_collection(role, collection):
+        raise HTTPException(status_code=403, detail=f"Role '{role}' not allowed for collection '{collection}'")
+
+
+def _hash_query(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return None
+    return sha256(text.encode("utf-8")).hexdigest()
+
+
+def _audit_event(
+    actor: str,
+    role: str,
+    action: str,
+    collection: Optional[str],
+    query: Optional[str],
+    result_count: Optional[int],
+    status: str,
+    detail: Optional[str] = None,
+) -> None:
+    with audit_lock:
+        audit_events.append(
+            {
+                "ts": time.time(),
+                "actor": actor,
+                "role": role,
+                "action": action,
+                "collection": collection,
+                "query_hash": _hash_query(query),
+                "result_count": result_count,
+                "status": status,
+                "detail": detail,
+            }
+        )
+
+
+def _token_estimate(texts: List[str]) -> int:
+    # lightweight estimate for OpenAI-compatible usage fields
+    return sum(max(1, len(t.split())) for t in texts)
 
 
 class EmbedRequest(BaseModel):
@@ -234,6 +342,112 @@ class RerankRequest(BaseModel):
 class TaskResponse(BaseModel):
     task_id: str
     status: str
+
+
+class OpenAIEmbeddingsRequest(BaseModel):
+    input: Union[str, List[str]]
+    model: Optional[str] = None
+    encoding_format: str = "float"
+    user: Optional[str] = None
+
+
+class OpenAIEmbeddingItem(BaseModel):
+    object: str = "embedding"
+    embedding: List[float]
+    index: int
+
+
+class OpenAIUsage(BaseModel):
+    prompt_tokens: int
+    total_tokens: int
+
+
+class OpenAIEmbeddingsResponse(BaseModel):
+    object: str = "list"
+    data: List[OpenAIEmbeddingItem]
+    model: str
+    usage: OpenAIUsage
+
+
+class AuditEvent(BaseModel):
+    ts: float
+    actor: str
+    role: str
+    action: str
+    collection: Optional[str] = None
+    query_hash: Optional[str] = None
+    result_count: Optional[int] = None
+    status: str
+    detail: Optional[str] = None
+
+
+class AuditEventsResponse(BaseModel):
+    count: int
+    events: List[AuditEvent]
+
+
+class MemorySpaceEnsureRequest(BaseModel):
+    collection: str = DEFAULT_COLLECTION
+    recreate: bool = False
+
+
+class MemoryPutItem(BaseModel):
+    id: Optional[Union[int, str]] = None
+    text: str
+    role: str = "fact"
+    importance: float = Field(default=0.5, ge=0.0, le=1.0)
+    tags: List[str] = Field(default_factory=list)
+    source: Optional[str] = None
+    session_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryWriteRequest(BaseModel):
+    collection: str = DEFAULT_COLLECTION
+    items: List[MemoryPutItem] = Field(min_length=1)
+    prefix: str = "memory: "
+
+
+class MemoryQueryRequest(BaseModel):
+    collection: str = DEFAULT_COLLECTION
+    query: str
+    top_k: int = Field(default=10, ge=1, le=100)
+    min_importance: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    tags_any: Optional[List[str]] = None
+    session_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    with_payload: bool = True
+
+
+class MemoryGetRequest(BaseModel):
+    collection: str = DEFAULT_COLLECTION
+    ids: List[Union[int, str]] = Field(min_length=1)
+
+
+class MemoryUpdateRequest(BaseModel):
+    collection: str = DEFAULT_COLLECTION
+    ids: List[Union[int, str]] = Field(min_length=1)
+    set_payload: Dict[str, Any]
+    wait: bool = True
+
+
+class MemoryForgetRequest(BaseModel):
+    collection: str = DEFAULT_COLLECTION
+    ids: Optional[List[Union[int, str]]] = None
+    session_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    tags_any: Optional[List[str]] = None
+    wait: bool = True
+
+
+class MemoryScrollRequest(BaseModel):
+    collection: str = DEFAULT_COLLECTION
+    limit: int = Field(default=20, ge=1, le=500)
+    offset: Optional[Union[int, str]] = None
+    session_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    tags_any: Optional[List[str]] = None
 
 
 def _tokenize(text: str) -> List[str]:
@@ -466,28 +680,51 @@ def metrics() -> str:
 
 
 @app.get("/collections")
-def list_collections(x_api_key: Optional[str] = Header(default=None)) -> dict:
+def list_collections(
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
     check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "collections.list", None)
     assert qdrant is not None
     data = qdrant.get_collections()
     names = [c.name for c in data.collections]
+    _audit_event(x_actor or "anonymous", role, "collections.list", None, None, len(names), "ok")
     return {"count": len(names), "collections": names}
 
 
 @app.get("/collections/{name}/stats")
-def collection_stats(name: str, x_api_key: Optional[str] = Header(default=None)) -> dict:
+def collection_stats(
+    name: str,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
     check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "collections.stats", name)
     assert qdrant is not None
     if not qdrant.collection_exists(name):
         raise HTTPException(status_code=404, detail="Collection not found")
     info = qdrant.get_collection(name)
     payload = info.model_dump(mode="json") if hasattr(info, "model_dump") else json.loads(info.json())
+    _audit_event(x_actor or "anonymous", role, "collections.stats", name, None, None, "ok")
     return {"collection": name, "stats": payload}
 
 
 @app.post("/collections/{name}/ensure", response_model=EnsureCollectionResponse)
-def ensure_collection(name: str, req: EnsureCollectionRequest, x_api_key: Optional[str] = Header(default=None)) -> dict:
+def ensure_collection(
+    name: str,
+    req: EnsureCollectionRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
     check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "collections.ensure", name)
     assert qdrant is not None
 
     created = False
@@ -506,12 +743,20 @@ def ensure_collection(name: str, req: EnsureCollectionRequest, x_api_key: Option
     _validate_collection_dim(name)
     assert vector_dim is not None
     logger.info("ensure_collection name=%s created=%s recreated=%s", name, created, recreated)
+    _audit_event(x_actor or "anonymous", role, "collections.ensure", name, None, None, "ok")
     return {"collection": name, "created": created, "recreated": recreated, "dim": vector_dim}
 
 
 @app.post("/embed", response_model=EmbedResponse)
-def embed(req: EmbedRequest, x_api_key: Optional[str] = Header(default=None)) -> dict:
+def embed(
+    req: EmbedRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
     check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "vectors.embed", None)
     prefix = req.prefix or ""
     texts: List[str] = []
     for t in req.texts:
@@ -520,15 +765,24 @@ def embed(req: EmbedRequest, x_api_key: Optional[str] = Header(default=None)) ->
             item = item.strip()
         texts.append(prefix + item)
     dense = _embed_texts(texts)
+    _audit_event(x_actor or "anonymous", role, "vectors.embed", None, None, len(texts), "ok")
     return {"dim": int(dense.shape[1]), "vectors": dense.tolist()}
 
 
 @app.post("/upsert", response_model=UpsertResponse)
-def upsert(req: UpsertRequest, x_api_key: Optional[str] = Header(default=None)) -> dict:
+def upsert(
+    req: UpsertRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
     check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "vectors.upsert", req.collection)
     count = _upsert_items(req.collection, req.items, req.prefix, req.strip)
     assert vector_dim is not None
     logger.info("upsert collection=%s count=%s", req.collection, count)
+    _audit_event(x_actor or "anonymous", role, "vectors.upsert", req.collection, None, count, "ok")
     return {"collection": req.collection, "count": count, "dim": int(vector_dim)}
 
 
@@ -540,8 +794,12 @@ async def bulk_upsert_file(
     prefix: str = Form("passage: "),
     strip: bool = Form(True),
     x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
 ) -> dict:
     check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "vectors.upsert", collection)
     task_id = str(uuid4())
 
     suffix = ".jsonl"
@@ -567,8 +825,15 @@ async def bulk_upsert_file(
 
 
 @app.get("/tasks/{task_id}")
-def get_task(task_id: str, x_api_key: Optional[str] = Header(default=None)) -> dict:
+def get_task(
+    task_id: str,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
     check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "vectors.upsert", None)
     with tasks_lock:
         task = tasks_state.get(task_id)
         if not task:
@@ -577,8 +842,15 @@ def get_task(task_id: str, x_api_key: Optional[str] = Header(default=None)) -> d
 
 
 @app.post("/search", response_model=SearchResponse)
-def search(req: SearchRequest, x_api_key: Optional[str] = Header(default=None)) -> dict:
+def search(
+    req: SearchRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
     check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "vectors.search", req.collection)
     assert qdrant is not None
     _ensure_collection(req.collection)
 
@@ -609,12 +881,20 @@ def search(req: SearchRequest, x_api_key: Optional[str] = Header(default=None)) 
         }
         for hit in hits
     ]
+    _audit_event(x_actor or "anonymous", role, "vectors.search", req.collection, req.query, len(results), "ok")
     return {"collection": req.collection, "count": len(results), "results": results}
 
 
 @app.post("/query-hybrid", response_model=SearchResponse)
-def query_hybrid(req: QueryHybridRequest, x_api_key: Optional[str] = Header(default=None)) -> dict:
+def query_hybrid(
+    req: QueryHybridRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
     check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "vectors.search", req.collection)
     assert qdrant is not None
     _ensure_collection(req.collection)
 
@@ -645,12 +925,20 @@ def query_hybrid(req: QueryHybridRequest, x_api_key: Optional[str] = Header(defa
 
     reranked.sort(key=lambda x: x["score"], reverse=True)
     results = reranked[: req.top_k]
+    _audit_event(x_actor or "anonymous", role, "vectors.search", req.collection, req.query, len(results), "ok")
     return {"collection": req.collection, "count": len(results), "results": results}
 
 
 @app.post("/rerank")
-def rerank(req: RerankRequest, x_api_key: Optional[str] = Header(default=None)) -> dict:
+def rerank(
+    req: RerankRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
     check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "vectors.rerank", None)
     scored = []
     for cand in req.candidates:
         lexical = _lexical_score(req.query, cand.text)
@@ -666,12 +954,21 @@ def rerank(req: RerankRequest, x_api_key: Optional[str] = Header(default=None)) 
         )
 
     scored.sort(key=lambda x: x["score"], reverse=True)
-    return {"count": min(req.top_k, len(scored)), "results": scored[: req.top_k]}
+    result_count = min(req.top_k, len(scored))
+    _audit_event(x_actor or "anonymous", role, "vectors.rerank", None, req.query, result_count, "ok")
+    return {"count": result_count, "results": scored[: req.top_k]}
 
 
 @app.post("/retrieve")
-def retrieve(req: RetrieveRequest, x_api_key: Optional[str] = Header(default=None)) -> dict:
+def retrieve(
+    req: RetrieveRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
     check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "vectors.retrieve", req.collection)
     assert qdrant is not None
     _ensure_collection(req.collection)
 
@@ -692,12 +989,20 @@ def retrieve(req: RetrieveRequest, x_api_key: Optional[str] = Header(default=Non
                 "vector": r.vector if req.with_vectors else None,
             }
         )
+    _audit_event(x_actor or "anonymous", role, "vectors.retrieve", req.collection, None, len(points), "ok")
     return {"collection": req.collection, "count": len(points), "points": points}
 
 
 @app.post("/scroll")
-def scroll(req: ScrollRequest, x_api_key: Optional[str] = Header(default=None)) -> dict:
+def scroll(
+    req: ScrollRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
     check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "vectors.scroll", req.collection)
     assert qdrant is not None
     _ensure_collection(req.collection)
 
@@ -719,12 +1024,20 @@ def scroll(req: ScrollRequest, x_api_key: Optional[str] = Header(default=None)) 
         }
         for p in points
     ]
+    _audit_event(x_actor or "anonymous", role, "vectors.scroll", req.collection, None, len(out), "ok")
     return {"collection": req.collection, "count": len(out), "next_offset": next_offset, "points": out}
 
 
 @app.post("/update-payload")
-def update_payload(req: UpdatePayloadRequest, x_api_key: Optional[str] = Header(default=None)) -> dict:
+def update_payload(
+    req: UpdatePayloadRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
     check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "vectors.update", req.collection)
     assert qdrant is not None
     _ensure_collection(req.collection)
 
@@ -756,6 +1069,7 @@ def update_payload(req: UpdatePayloadRequest, x_api_key: Optional[str] = Header(
     )
 
     status = str(result.status) if result is not None else "unknown"
+    _audit_event(x_actor or "anonymous", role, "vectors.update", req.collection, None, requested, "ok")
     return {
         "collection": req.collection,
         "mode": mode,
@@ -765,8 +1079,15 @@ def update_payload(req: UpdatePayloadRequest, x_api_key: Optional[str] = Header(
 
 
 @app.post("/delete", response_model=DeleteResponse)
-def delete(req: DeleteRequest, x_api_key: Optional[str] = Header(default=None)) -> dict:
+def delete(
+    req: DeleteRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
     check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "vectors.delete", req.collection)
     assert qdrant is not None
     _ensure_collection(req.collection)
 
@@ -790,9 +1111,308 @@ def delete(req: DeleteRequest, x_api_key: Optional[str] = Header(default=None)) 
     result = qdrant.delete(collection_name=req.collection, points_selector=selector, wait=req.wait)
     status = str(result.status) if result is not None else "unknown"
     logger.info("delete collection=%s mode=%s requested=%s status=%s", req.collection, mode, requested, status)
+    _audit_event(x_actor or "anonymous", role, "vectors.delete", req.collection, None, requested, "ok")
     return {
         "collection": req.collection,
         "mode": mode,
         "requested": requested,
         "status": status,
     }
+
+
+@app.post("/v1/embeddings", response_model=OpenAIEmbeddingsResponse)
+def openai_embeddings(
+    req: OpenAIEmbeddingsRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "vectors.embed", None)
+
+    inputs = [req.input] if isinstance(req.input, str) else list(req.input)
+    if not inputs:
+        raise HTTPException(status_code=400, detail="input cannot be empty")
+    if req.encoding_format != "float":
+        raise HTTPException(status_code=400, detail="only encoding_format='float' is supported")
+
+    dense = _embed_texts(inputs)
+    data = [
+        {
+            "object": "embedding",
+            "index": idx,
+            "embedding": dense[idx].tolist(),
+        }
+        for idx in range(len(inputs))
+    ]
+    usage_tokens = _token_estimate(inputs)
+    _audit_event(x_actor or "anonymous", role, "vectors.embed", None, None, len(inputs), "ok")
+    return {
+        "object": "list",
+        "data": data,
+        "model": req.model or MODEL_NAME,
+        "usage": {
+            "prompt_tokens": usage_tokens,
+            "total_tokens": usage_tokens,
+        },
+    }
+
+
+@app.get("/audit/events", response_model=AuditEventsResponse)
+def get_audit_events(
+    limit: int = 100,
+    action: Optional[str] = None,
+    collection: Optional[str] = None,
+    actor: Optional[str] = None,
+    status: Optional[str] = None,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "audit.read", None)
+
+    if limit < 1 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be in [1, 1000]")
+
+    with audit_lock:
+        events = list(audit_events)
+
+    def _match(evt: Dict[str, Any]) -> bool:
+        if action and evt.get("action") != action:
+            return False
+        if collection and evt.get("collection") != collection:
+            return False
+        if actor and evt.get("actor") != actor:
+            return False
+        if status and evt.get("status") != status:
+            return False
+        return True
+
+    filtered = [e for e in events if _match(e)]
+    filtered = filtered[-limit:]
+    _audit_event(x_actor or "anonymous", role, "audit.read", None, None, len(filtered), "ok")
+    return {"count": len(filtered), "events": filtered}
+
+
+def _memory_filter(
+    min_importance: Optional[float] = None,
+    tags_any: Optional[List[str]] = None,
+    session_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> Optional[models.Filter]:
+    conditions: List[Any] = []
+    if min_importance is not None:
+        conditions.append(
+            models.FieldCondition(
+                key="importance",
+                range=models.Range(gte=min_importance),
+            )
+        )
+    if tags_any:
+        conditions.append(
+            models.FieldCondition(
+                key="tags",
+                match=models.MatchAny(any=tags_any),
+            )
+        )
+    if session_id:
+        conditions.append(models.FieldCondition(key="session_id", match=models.MatchValue(value=session_id)))
+    if agent_id:
+        conditions.append(models.FieldCondition(key="agent_id", match=models.MatchValue(value=agent_id)))
+    if not conditions:
+        return None
+    return models.Filter(must=conditions)
+
+
+@app.post("/memory/spaces/ensure")
+def memory_space_ensure(
+    req: MemorySpaceEnsureRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "collections.ensure", req.collection)
+    result = ensure_collection(req.collection, EnsureCollectionRequest(recreate=req.recreate), x_api_key, x_role, x_actor)
+    _audit_event(x_actor or "anonymous", role, "memory.manage", req.collection, None, None, "ok")
+    return result
+
+
+@app.post("/memory/write")
+def memory_write(
+    req: MemoryWriteRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "memory.write", req.collection)
+
+    converted: List[UpsertItem] = []
+    for item in req.items:
+        payload = dict(item.metadata)
+        payload.update(
+            {
+                "role": item.role,
+                "importance": item.importance,
+                "tags": item.tags,
+                "source": item.source,
+                "session_id": item.session_id,
+                "agent_id": item.agent_id,
+                "created_by": x_actor,
+            }
+        )
+        converted.append(UpsertItem(id=item.id, text=item.text, metadata=payload))
+
+    count = _upsert_items(req.collection, converted, req.prefix, True)
+    _audit_event(x_actor or "anonymous", role, "memory.write", req.collection, None, count, "ok")
+    return {"collection": req.collection, "count": count}
+
+
+@app.post("/memory/query")
+def memory_query(
+    req: MemoryQueryRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "memory.read", req.collection)
+    assert qdrant is not None
+    _ensure_collection(req.collection)
+
+    vector = _embed_texts(["query: " + req.query])[0].tolist()
+    query_filter = _memory_filter(req.min_importance, req.tags_any, req.session_id, req.agent_id)
+    hits = qdrant.search(
+        collection_name=req.collection,
+        query_vector=vector,
+        limit=req.top_k,
+        query_filter=query_filter,
+        with_payload=req.with_payload,
+        search_params=models.SearchParams(hnsw_ef=DEFAULT_HNSW_EF, exact=False),
+    )
+    results = [
+        {"id": hit.id, "score": float(hit.score), "payload": hit.payload if req.with_payload else None}
+        for hit in hits
+    ]
+    _audit_event(x_actor or "anonymous", role, "memory.read", req.collection, req.query, len(results), "ok")
+    return {"collection": req.collection, "count": len(results), "results": results}
+
+
+@app.post("/memory/get")
+def memory_get(
+    req: MemoryGetRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "memory.read", req.collection)
+    response = retrieve(
+        RetrieveRequest(collection=req.collection, ids=req.ids, with_payload=True, with_vectors=False),
+        x_api_key,
+        x_role,
+        x_actor,
+    )
+    _audit_event(x_actor or "anonymous", role, "memory.read", req.collection, None, response.get("count", 0), "ok")
+    return response
+
+
+@app.post("/memory/update")
+def memory_update(
+    req: MemoryUpdateRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "memory.write", req.collection)
+    out = update_payload(
+        UpdatePayloadRequest(collection=req.collection, payload=req.set_payload, ids=req.ids, wait=req.wait),
+        x_api_key,
+        x_role,
+        x_actor,
+    )
+    _audit_event(x_actor or "anonymous", role, "memory.write", req.collection, None, len(req.ids), "ok")
+    return out
+
+
+@app.post("/memory/forget")
+def memory_forget(
+    req: MemoryForgetRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "memory.write", req.collection)
+
+    if req.ids:
+        out = delete(DeleteRequest(collection=req.collection, ids=req.ids, wait=req.wait), x_api_key, x_role, x_actor)
+        _audit_event(x_actor or "anonymous", role, "memory.write", req.collection, None, len(req.ids), "ok")
+        return out
+
+    mem_filter = _memory_filter(None, req.tags_any, req.session_id, req.agent_id)
+    if mem_filter is None:
+        raise HTTPException(status_code=400, detail="ids or at least one filter is required")
+
+    out = delete(
+        DeleteRequest(collection=req.collection, filter=mem_filter.model_dump(mode="json"), wait=req.wait),
+        x_api_key,
+        x_role,
+        x_actor,
+    )
+    _audit_event(x_actor or "anonymous", role, "memory.write", req.collection, None, out.get("requested", 0), "ok")
+    return out
+
+
+@app.post("/memory/scroll")
+def memory_scroll(
+    req: MemoryScrollRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "memory.read", req.collection)
+    mem_filter = _memory_filter(None, req.tags_any, req.session_id, req.agent_id)
+    out = scroll(
+        ScrollRequest(
+            collection=req.collection,
+            limit=req.limit,
+            offset=req.offset,
+            with_payload=True,
+            with_vectors=False,
+            filter=mem_filter.model_dump(mode="json") if mem_filter else None,
+        ),
+        x_api_key,
+        x_role,
+        x_actor,
+    )
+    _audit_event(x_actor or "anonymous", role, "memory.read", req.collection, None, out.get("count", 0), "ok")
+    return out
+
+
+@app.get("/memory/spaces/{collection}/stats")
+def memory_space_stats(
+    collection: str,
+    x_api_key: Optional[str] = Header(default=None),
+    x_role: Optional[str] = Header(default=None),
+    x_actor: Optional[str] = Header(default="anonymous"),
+) -> dict:
+    check_key(x_api_key)
+    role = _resolve_role(x_role)
+    _authorize(role, "memory.read", collection)
+    stats = collection_stats(collection, x_api_key, x_role, x_actor)
+    _audit_event(x_actor or "anonymous", role, "memory.read", collection, None, None, "ok")
+    return stats
